@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Environment variables and secrets
+.env
+*.env
+
+# Data and databases
+*.db
+*.sqlite
+*.csv
+*.parquet
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Operating system files
+.DS_Store
+Thumbs.db
