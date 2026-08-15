@@ -4,6 +4,18 @@ from datetime import datetime
 
 import serial
 
+try:
+    from .anomaly_detector import (
+        detect_change_anomalies,
+        validate_reading,
+    )
+except ImportError:
+    # Used when running: python3 src/sensor_reader.py
+    from anomaly_detector import (
+        detect_change_anomalies,
+        validate_reading,
+    )
+
 
 # -------------------------------------
 # Configuration
@@ -66,31 +78,18 @@ def init_db(conn):
 
 def parse_line(line):
     """
-    Convert a line such as:
+    Convert a valid Arduino CSV line into temperature
+    and humidity values.
 
-        24.50,63.00
-
-    into two floating-point values:
-
-        temperature = 24.5
-        humidity = 63.0
-
-    Invalid lines return (None, None).
+    Invalid readings return (None, None).
     """
 
-    parts = line.strip().split(",")
+    reading, _ = validate_reading(line)
 
-    if len(parts) != 2:
+    if reading is None:
         return None, None
 
-    try:
-        temperature = float(parts[0])
-        humidity = float(parts[1])
-
-        return temperature, humidity
-
-    except ValueError:
-        return None, None
+    return reading
 
 
 # ---------------------------------------------
@@ -166,39 +165,93 @@ def main():
                 "Press Ctrl+C to stop."
             )
 
+            previous_temperature = None
+            previous_humidity = None
+
             while True:
                 raw = ser.readline().decode(
                     "utf-8",
                     errors="ignore",
                 )
 
-                temperature, humidity = parse_line(raw)
+                current_time = datetime.now().strftime(
+                    "%H:%M:%S"
+                )
 
-                if temperature is None:
+                reading, rejection_reason = validate_reading(
+                    raw
+                )
+
+                # Invalid readings are rejected and are not
+                # written to the database.
+                if rejection_reason is not None:
+                    raw_display = raw.strip() or "<empty>"
+
+                    print(
+                        f"{current_time} | "
+                        f"{rejection_reason} | "
+                        f"Raw: {raw_display!r}"
+                    )
+
                     continue
 
+                temperature, humidity = reading
+
+                # Compare this valid reading with the previous
+                # valid reading.
+                change_events = detect_change_anomalies(
+                    temperature=temperature,
+                    humidity=humidity,
+                    previous_temperature=previous_temperature,
+                    previous_humidity=previous_humidity,
+                )
+
+                # Store the valid reading and calculate
+                # threshold-alert flags.
                 temp_alert, hum_alert = store_reading(
                     conn,
                     temperature,
                     humidity,
                 )
 
-                alert_message = (
-                    " ALERT!"
-                    if temp_alert or hum_alert
-                    else ""
-                )
+                threshold_messages = []
 
-                current_time = datetime.now().strftime(
-                    "%H:%M:%S"
-                )
+                if temp_alert:
+                    threshold_messages.append(
+                        "temperature above 30°C"
+                    )
+
+                if hum_alert:
+                    threshold_messages.append(
+                        "humidity above 80%"
+                    )
+
+                if threshold_messages:
+                    threshold_status = (
+                        "THRESHOLD ALERT: "
+                        + "; ".join(threshold_messages)
+                    )
+                else:
+                    threshold_status = "Normal"
 
                 print(
                     f"{current_time} | "
-                    f"Temp: {temperature}°C | "
-                    f"Hum: {humidity}%"
-                    f"{alert_message}"
+                    f"Temp: {temperature:.1f}°C | "
+                    f"Hum: {humidity:.1f}% | "
+                    f"{threshold_status}"
                 )
+
+                for event in change_events:
+                    print(
+                        f"{current_time} | "
+                        f"CHANGE ANOMALY | "
+                        f"{event['message']}"
+                    )
+
+                # Only valid readings become the previous values.
+                previous_temperature = temperature
+                previous_humidity = humidity
+
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
