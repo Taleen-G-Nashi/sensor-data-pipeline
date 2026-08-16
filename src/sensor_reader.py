@@ -43,8 +43,7 @@ THRESHOLDS = {
 
 def init_db(conn):
     """
-    Create the sensor_readings table and timestamp index
-    if they do not already exist.
+    Create database tables and indexes if they do not exist.
     """
 
     conn.execute(
@@ -56,6 +55,21 @@ def init_db(conn):
             humidity REAL NOT NULL,
             temp_alert INTEGER NOT NULL DEFAULT 0,
             hum_alert INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reading_id INTEGER,
+            sensor_name TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (reading_id)
+                REFERENCES sensor_readings (id)
         )
         """
     )
@@ -109,7 +123,7 @@ def store_reading(conn, temperature, humidity):
         humidity > THRESHOLDS["humidity"]
     )
 
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO sensor_readings (
             timestamp,
@@ -131,7 +145,48 @@ def store_reading(conn, temperature, humidity):
 
     conn.commit()
 
-    return temp_alert, hum_alert
+    reading_id = cursor.lastrowid
+
+    return reading_id, temp_alert, hum_alert
+
+#-----------------------
+#Storing Alert Events
+#-----------------------
+def store_alert_event(
+    conn,
+    reading_id,
+    sensor_name,
+    alert_type,
+    message,
+):
+    """
+    Store one alert or anomaly event.
+
+    reading_id may be None for invalid readings because
+    rejected readings are not stored in sensor_readings.
+    """
+
+    conn.execute(
+        """
+        INSERT INTO alert_events (
+            reading_id,
+            sensor_name,
+            alert_type,
+            message,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            reading_id,
+            sensor_name,
+            alert_type,
+            message,
+            datetime.now().isoformat(),
+        ),
+    )
+
+    conn.commit()
 
 
 # ------------------------------------------------------------
@@ -187,6 +242,22 @@ def main():
                 if rejection_reason is not None:
                     raw_display = raw.strip() or "<empty>"
 
+                    # Identify which sensor the rejection refers to when possible.
+                    if "temperature" in rejection_reason.lower():
+                        sensor_name = "temperature"
+                    elif "humidity" in rejection_reason.lower():
+                        sensor_name = "humidity"
+                    else:
+                        sensor_name = "reading"
+
+                    store_alert_event(
+                        conn,
+                        reading_id=None,
+                        sensor_name=sensor_name,
+                        alert_type="invalid_reading",
+                        message=rejection_reason,
+                    )
+
                     print(
                         f"{current_time} | "
                         f"{rejection_reason} | "
@@ -208,7 +279,7 @@ def main():
 
                 # Store the valid reading and calculate
                 # threshold-alert flags.
-                temp_alert, hum_alert = store_reading(
+                reading_id, temp_alert, hum_alert = store_reading(
                     conn,
                     temperature,
                     humidity,
@@ -217,13 +288,29 @@ def main():
                 threshold_messages = []
 
                 if temp_alert:
-                    threshold_messages.append(
-                        "temperature above 30°C"
+                    store_alert_event(
+                        conn,
+                        reading_id=reading_id,
+                        sensor_name="temperature",
+                        alert_type="threshold_alert",
+                        message=(
+                            f"Temperature {temperature:.1f}°C "
+                            f"exceeded threshold "
+                            f"{THRESHOLDS['temperature']:.1f}°C"
+                        ),
                     )
 
                 if hum_alert:
-                    threshold_messages.append(
-                        "humidity above 80%"
+                    store_alert_event(
+                        conn,
+                        reading_id=reading_id,
+                        sensor_name="humidity",
+                        alert_type="threshold_alert",
+                        message=(
+                            f"Humidity {humidity:.1f}% "
+                            f"exceeded threshold "
+                            f"{THRESHOLDS['humidity']:.1f}%"
+                        ),
                     )
 
                 if threshold_messages:
@@ -242,6 +329,14 @@ def main():
                 )
 
                 for event in change_events:
+                    store_alert_event(
+                        conn,
+                        reading_id=reading_id,
+                        sensor_name=event["sensor_name"],
+                        alert_type=event["alert_type"],
+                        message=event["message"],
+                    )
+
                     print(
                         f"{current_time} | "
                         f"CHANGE ANOMALY | "

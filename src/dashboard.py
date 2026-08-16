@@ -52,9 +52,9 @@ def get_recent_readings(limit=50):
     return list(reversed(rows))
 
 
-def get_summary_counts():
+def get_summary_stats():
     """
-    Return total number of readings and total number of alert readings.
+    Return total readings, total alert events, and pipeline uptime.
     """
 
     conn = sqlite3.connect(DB_PATH)
@@ -66,25 +66,90 @@ def get_summary_counts():
         """
     ).fetchone()[0]
 
-    alert_readings = conn.execute(
+    total_alerts = conn.execute(
         """
         SELECT COUNT(*)
+        FROM alert_events
+        """
+    ).fetchone()[0]
+
+    first_timestamp = conn.execute(
+        """
+        SELECT MIN(timestamp)
         FROM sensor_readings
-        WHERE temp_alert = 1 OR hum_alert = 1
+        """
+    ).fetchone()[0]
+
+    last_timestamp = conn.execute(
+        """
+        SELECT MAX(timestamp)
+        FROM sensor_readings
         """
     ).fetchone()[0]
 
     conn.close()
 
-    return total_readings, alert_readings
+    if first_timestamp and last_timestamp:
+        start = datetime.fromisoformat(first_timestamp)
+        end = datetime.fromisoformat(last_timestamp)
 
+        uptime_seconds = int(
+            (end - start).total_seconds()
+        )
 
-def create_time_series_plot(rows):
+        hours, remainder = divmod(
+            uptime_seconds,
+            3600,
+        )
+
+        minutes, seconds = divmod(
+            remainder,
+            60,
+        )
+
+        uptime = (
+            f"{hours}h {minutes}m {seconds}s"
+        )
+    else:
+        uptime = "--"
+
+    return total_readings, total_alerts, uptime
+
+def get_recent_events(limit=10):
     """
-    Create a temperature and humidity time-series plot.
+    Return the most recent alert/anomaly events.
+    """
 
-    The plot is returned as a base64 string so it can be embedded directly
-    inside the Flask HTML page.
+    conn = sqlite3.connect(DB_PATH)
+
+    rows = conn.execute(
+        """
+        SELECT
+            sensor_name,
+            alert_type,
+            message,
+            created_at
+        FROM alert_events
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def create_plot(
+    rows,
+    value_index,
+    title,
+    ylabel,
+    threshold,
+):
+    """
+    Create one time-series plot and return it as base64.
     """
 
     timestamps = [
@@ -92,67 +157,35 @@ def create_time_series_plot(rows):
         for row in rows
     ]
 
-    temperatures = [
-        row[1]
+    values = [
+        row[value_index]
         for row in rows
     ]
 
-    humidities = [
-        row[2]
-        for row in rows
-    ]
-
-    fig, (ax1, ax2) = plt.subplots(
-        2,
-        1,
-        figsize=(10, 6),
-        sharex=True,
+    fig, ax = plt.subplots(
+        figsize=(10, 4)
     )
 
-    fig.suptitle(
-        "Real-Time Sensor Monitoring Dashboard",
-        fontsize=14,
-        fontweight="bold",
-    )
-
-    ax1.plot(
+    ax.plot(
         timestamps,
-        temperatures,
+        values,
         linewidth=1.5,
-        label="Temperature",
     )
 
-    ax1.axhline(
-        y=30.0,
+    ax.axhline(
+        y=threshold,
         linestyle="--",
         alpha=0.6,
-        label="Temperature alert threshold",
+        label=f"Alert threshold: {threshold}",
     )
 
-    ax1.set_ylabel("Temperature (°C)")
-    ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.3)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("Time")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
 
-    ax2.plot(
-        timestamps,
-        humidities,
-        linewidth=1.5,
-        label="Humidity",
-    )
-
-    ax2.axhline(
-        y=80.0,
-        linestyle="--",
-        alpha=0.6,
-        label="Humidity alert threshold",
-    )
-
-    ax2.set_ylabel("Humidity (%)")
-    ax2.set_xlabel("Time")
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
-    ax2.xaxis.set_major_formatter(
+    ax.xaxis.set_major_formatter(
         mdates.DateFormatter("%H:%M:%S")
     )
 
@@ -267,14 +300,28 @@ HTML = """
         <h2>Current Reading</h2>
 
         <div class="stat">
-            <div class="value">{{ latest_temp }}°C</div>
-            <div class="label">Temperature</div>
-        </div>
+    <div class="value">{{ latest_temp }}°C</div>
+    <div class="label">
+        Temperature —
+        {% if latest_temp_alert %}
+            <span class="alert">ALERT</span>
+        {% else %}
+            <span class="normal">Normal</span>
+        {% endif %}
+    </div>
+</div>
 
-        <div class="stat">
-            <div class="value">{{ latest_humidity }}%</div>
-            <div class="label">Humidity</div>
-        </div>
+<div class="stat">
+    <div class="value">{{ latest_humidity }}%</div>
+    <div class="label">
+        Humidity —
+        {% if latest_hum_alert %}
+            <span class="alert">ALERT</span>
+        {% else %}
+            <span class="normal">Normal</span>
+        {% endif %}
+    </div>
+</div>
 
         <div class="stat">
             <div class="value">{{ total_readings }}</div>
@@ -282,28 +329,64 @@ HTML = """
         </div>
 
         <div class="stat">
-            <div class="value">{{ alert_readings }}</div>
-            <div class="label">Alert Readings</div>
-        </div>
+    <div class="value">{{ total_alerts }}</div>
+    <div class="label">Alert Events</div>
+</div>
 
-        <p>
-            Current status:
-            {% if latest_temp_alert or latest_hum_alert %}
-                <span class="alert">ALERT</span>
-            {% else %}
-                <span class="normal">Normal</span>
-            {% endif %}
-        </p>
+<div class="stat">
+    <div class="value">{{ uptime }}</div>
+    <div class="label">Data Span</div>
+</div>
+
+        
     </div>
 
     <div class="card">
-        <h2>Recent Time-Series Plot</h2>
-        {% if plot_image %}
-            <img src="data:image/png;base64,{{ plot_image }}">
-        {% else %}
-            <p>No plot available yet.</p>
-        {% endif %}
-    </div>
+    <h2>Temperature — Last 50 Readings</h2>
+
+    {% if temperature_plot %}
+        <img src="data:image/png;base64,{{ temperature_plot }}">
+    {% else %}
+        <p>No temperature data available yet.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Humidity — Last 50 Readings</h2>
+
+    {% if humidity_plot %}
+        <img src="data:image/png;base64,{{ humidity_plot }}">
+    {% else %}
+        <p>No humidity data available yet.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Recent Events</h2>
+
+    {% if recent_events %}
+    <table>
+        <tr>
+            <th>Sensor</th>
+            <th>Type</th>
+            <th>Message</th>
+            <th>Timestamp</th>
+        </tr>
+
+        {% for event in recent_events %}
+        <tr>
+            <td>{{ event[0] }}</td>
+            <td>{{ event[1] }}</td>
+            <td>{{ event[2] }}</td>
+            <td>{{ event[3][:19] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    {% else %}
+        <p>No alert events recorded yet.</p>
+    {% endif %}
+</div>
 
     <div class="card">
         <h2>Recent Readings</h2>
@@ -341,6 +424,14 @@ HTML = """
 def index():
     rows = get_recent_readings(limit=50)
 
+    total_readings, total_alerts, uptime = (
+        get_summary_stats()
+    )
+
+    recent_events = get_recent_events(
+        limit=10
+    )
+
     if not rows:
         return render_template_string(
             HTML,
@@ -348,15 +439,32 @@ def index():
             latest_humidity="--",
             latest_temp_alert=0,
             latest_hum_alert=0,
-            total_readings=0,
-            alert_readings=0,
+            total_readings=total_readings,
+            total_alerts=total_alerts,
+            uptime=uptime,
             recent_rows=[],
-            plot_image="",
+            recent_events=recent_events,
+            temperature_plot="",
+            humidity_plot="",
         )
 
-    total_readings, alert_readings = get_summary_counts()
     latest = rows[-1]
-    plot_image = create_time_series_plot(rows)
+
+    temperature_plot = create_plot(
+        rows,
+        value_index=1,
+        title="Temperature Over Time",
+        ylabel="Temperature (°C)",
+        threshold=30.0,
+    )
+
+    humidity_plot = create_plot(
+        rows,
+        value_index=2,
+        title="Humidity Over Time",
+        ylabel="Humidity (%)",
+        threshold=80.0,
+    )
 
     return render_template_string(
         HTML,
@@ -365,9 +473,14 @@ def index():
         latest_temp_alert=latest[3],
         latest_hum_alert=latest[4],
         total_readings=total_readings,
-        alert_readings=alert_readings,
-        recent_rows=list(reversed(rows[-20:])),
-        plot_image=plot_image,
+        total_alerts=total_alerts,
+        uptime=uptime,
+        recent_rows=list(
+            reversed(rows[-20:])
+        ),
+        recent_events=recent_events,
+        temperature_plot=temperature_plot,
+        humidity_plot=humidity_plot,
     )
 
 
