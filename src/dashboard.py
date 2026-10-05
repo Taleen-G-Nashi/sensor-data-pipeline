@@ -483,7 +483,54 @@ def index():
         humidity_plot=humidity_plot,
     )
 
+def init_dashboard_db():
+    """
+    Ensure the database tables required by the dashboard exist.
 
+    This allows the dashboard to start in a fresh environment,
+    including a new Docker container.
+    """
+
+    os.makedirs(
+        os.path.dirname(DB_PATH),
+        exist_ok=True,
+    )
+
+    conn = sqlite3.connect(DB_PATH)
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sensor_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            humidity REAL NOT NULL,
+            temp_alert INTEGER NOT NULL DEFAULT 0,
+            hum_alert INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reading_id INTEGER,
+            sensor_name TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (reading_id)
+                REFERENCES sensor_readings (id)
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+init_dashboard_db()
 if __name__ == "__main__":
     app.run(
         debug=True,
